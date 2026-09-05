@@ -1,0 +1,9 @@
+requests==2.32.3
+python-dotenv==1.0.1
+SQLAlchemy==2.0.35
+psycopg2-binary==2.9.9
+pandas==2.2.3
+gtfs-realtime-bindings==1.0.0
+tqdm==4.66.5
+jupyterlab==4.2.5
+matplotlib==3.9.2

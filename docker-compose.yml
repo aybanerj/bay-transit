@@ -1,0 +1,30 @@
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    # The official postgis/postgis image is amd64-only. On Apple Silicon /
+    # other arm64 hosts, Docker runs it under emulation -- this works fine
+    # for local dev, just somewhat slower. Pinning the platform explicitly
+    # silences the "platform does not match" warning. If you want a
+    # natively-built arm64 image instead, swap the image line for
+    # `imresamu/postgis:16-3.4-bookworm` (community multi-arch build) and
+    # drop the platform line below.
+    platform: linux/amd64
+    container_name: bay_transit_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-transit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-transit}
+      POSTGRES_DB: ${POSTGRES_DB:-bay_transit}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/schema:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-transit}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

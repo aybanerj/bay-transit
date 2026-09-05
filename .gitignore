@@ -1,0 +1,23 @@
+# env / secrets
+.env
+
+# data (raw downloads and derived caches are reproducible, don't commit)
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# notebooks: keep source, drop output noise via nbstripout if you add it
+*.pyo
+
+# postgres
+pgdata/
+
+# os
+.DS_Store

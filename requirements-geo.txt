@@ -1,0 +1,9 @@
+# Optional. Only needed once you're doing spatial-dataframe work in Python
+# (e.g. plotting shapes/stops with geopandas for the Phase 5 new-stop-siting
+# analysis). Everything in Phase 1-4 (loading GTFS, delay EDA, modeling) can
+# be done against Postgres/PostGIS directly via SQL/pandas without these --
+# they're kept separate because pyproj/geopandas sometimes need a system
+# PROJ/GDAL/GEOS install and can fail to build otherwise (see README
+# Troubleshooting section).
+geopandas==1.0.1
+shapely==2.0.6
