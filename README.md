@@ -50,16 +50,163 @@ inherently spatial — want `ST_DWithin`, nearest-neighbor queries, and
 eventually maybe `pgRouting` once I get to the "optimal new
 routes/stops" question.
 
-## Repo layout
+## Data dictionary
 
-```
-sql/schema/         DDL, applied in filename order
-scripts/            ingestion + loading scripts
-notebooks/          exploratory analysis 
-data/raw/           downloaded zips/protobuf (gitignored)
-data/processed/     any derived parquet/csv to cache (gitignored)
-docker-compose.yml  local Postgres+PostGIS        
-```
+Every table below (except `feed_version`) also carries a `feed_version_id`
+column as part of its real primary key, so multiple monthly snapshots can
+coexist — omitted from each table here for brevity.
+
+### `feed_version`
+Not a GTFS file — bookkeeping so multiple monthly snapshots can coexist.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `feed_version_id` | `SERIAL` | Primary key, referenced by every other table |
+| `source` | `TEXT` | e.g. `'RG'` for the regional consolidated feed |
+| `label` | `TEXT` | e.g. `'2025-08'` — the month/vintage |
+| `has_stop_observations` | `BOOLEAN` | Whether this vintage includes observed-delay data |
+| `loaded_at` | `TIMESTAMPTZ` | When you ran the load |
+
+### `agency` (from `agency.txt`)
+One row per transit operator.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `agency_id` | `TEXT` | Operator identifier, e.g. `SF` |
+| `agency_name` | `TEXT` | Human name, e.g. "San Francisco Municipal Transportation Agency" |
+| `agency_url` | `TEXT` | Operator's website |
+| `agency_timezone` | `TEXT` | e.g. `America/Los_Angeles` |
+| `agency_lang` | `TEXT` | Language code |
+| `agency_phone` | `TEXT` | Contact number |
+
+### `routes` (from `routes.txt`)
+One row per bus/rail line.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `route_id` | `TEXT` | Unique per operator, e.g. `SF:1` |
+| `agency_id` | `TEXT` | Links back to `agency` |
+| `route_short_name` | `TEXT` | Rider-facing label, e.g. `"38"` or `"N"` |
+| `route_long_name` | `TEXT` | e.g. `"Geary"` |
+| `route_desc` | `TEXT` | Free-text description |
+| `route_type` | `SMALLINT` | GTFS mode code: `0`=tram/streetcar, `1`=subway/metro, `2`=commuter rail, `3`=bus, `4`=ferry (others exist, rarer). Worth grouping by this — reliability differs a lot by mode. |
+| `route_color` | `TEXT` | Hex color, map display only |
+| `route_text_color` | `TEXT` | Hex color, map display only |
+
+### `stops` (from `stops.txt`)
+One row per physical stop/platform/station.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `stop_id` | `TEXT` | Unique per operator |
+| `stop_code` | `TEXT` | Rider-facing short code (printed on the physical sign) |
+| `stop_name` | `TEXT` | e.g. "Market St & 5th St" |
+| `stop_desc` | `TEXT` | Free-text description |
+| `stop_lat` / `stop_lon` | `DOUBLE PRECISION` | Coordinates |
+| `zone_id` | `TEXT` | Fare zone, if used |
+| `location_type` | `SMALLINT` | `0`=stop/platform, `1`=station (parent grouping), `2`=entrance/exit |
+| `parent_station` | `TEXT` | If this is a platform, the `stop_id` of its parent station |
+| `wheelchair_boarding` | `SMALLINT` | Accessibility flag |
+| `geom` | `geography(Point,4326)` | PostGIS point generated from lat/lon — enables spatial queries (`ST_DWithin`, nearest-neighbor, etc.) |
+
+### `calendar` (from `calendar.txt`)
+One row per named service pattern (e.g. "weekday service"), with day-of-week flags.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `service_id` | `TEXT` | Referenced by `trips.service_id` |
+| `monday` … `sunday` | `SMALLINT` (0/1) | Whether this service runs on that weekday |
+| `start_date` / `end_date` | `DATE` | Date range this pattern is valid for |
+
+### `calendar_dates` (from `calendar_dates.txt`)
+Exceptions to `calendar` — added/removed service on specific dates (holidays, etc.).
+
+| Column | Type | Meaning |
+|---|---|---|
+| `service_id` | `TEXT` | Which service pattern |
+| `date` | `DATE` | Specific date |
+| `exception_type` | `SMALLINT` | `1`=service added, `2`=service removed |
+
+### `trips` (from `trips.txt`)
+One row per scheduled vehicle run (e.g. "the 8:03am 38-Geary bus").
+
+| Column | Type | Meaning |
+|---|---|---|
+| `trip_id` | `TEXT` | Unique identifier for this specific run |
+| `route_id` | `TEXT` | Which route |
+| `service_id` | `TEXT` | Which calendar pattern (which days it runs) |
+| `trip_headsign` | `TEXT` | Destination text shown to riders |
+| `trip_short_name` | `TEXT` | Rider-facing short label, if any |
+| `direction_id` | `SMALLINT` | `0`/`1` — inbound vs outbound, roughly |
+| `block_id` | `TEXT` | Groups trips a single vehicle runs back-to-back |
+| `shape_id` | `TEXT` | Links to `shapes` for the physical path this trip follows |
+| `wheelchair_accessible` | `SMALLINT` | Accessibility flag |
+| `bikes_allowed` | `SMALLINT` | Bike-carriage flag |
+
+### `stop_times` (from `stop_times.txt`)
+One row per (trip, stop) — the *scheduled* timetable. Usually the largest static table.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `trip_id` | `TEXT` | Which trip |
+| `stop_id` | `TEXT` | Which stop |
+| `stop_sequence` | `INTEGER` | Order of this stop within the trip (1, 2, 3, …) |
+| `arrival_sec` / `departure_sec` | `INTEGER` | Seconds since midnight of the service day — not a `TIME` column, deliberately: GTFS allows values past `24:00:00` for trips running past midnight, which a `TIME` type would silently corrupt |
+| `stop_headsign` | `TEXT` | Overrides the trip's headsign at this stop, if set |
+| `pickup_type` / `drop_off_type` | `SMALLINT` | `0`=regular, `1`=none, `2`=phone ahead, `3`=coordinate with driver |
+| `shape_dist_traveled` | `DOUBLE PRECISION` | Distance along the shape at this stop |
+| `timepoint` | `SMALLINT` | `1`=exact scheduled time, `0`=approximate |
+
+### `shapes` (from `shapes.txt`)
+Raw lat/lon points describing the physical path a trip follows. One row per point.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `shape_id` | `TEXT` | Groups points into one path |
+| `shape_pt_sequence` | `INTEGER` | Order along the path |
+| `shape_pt_lat` / `shape_pt_lon` | `DOUBLE PRECISION` | Coordinates |
+| `shape_dist_traveled` | `DOUBLE PRECISION` | Cumulative distance at this point |
+
+(The `v_shape_lines` view stitches these into an actual PostGIS `LineString` per `shape_id` on demand — the raw table stores GTFS's native per-point format.)
+
+### `frequencies` (from `frequencies.txt`, optional)
+For trips that run on a fixed headway (e.g. "every 3 minutes, 6am-10pm") instead of a fixed schedule.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `trip_id` | `TEXT` | The template trip this applies to |
+| `start_sec` / `end_sec` | `INTEGER` | Time window (seconds since midnight) this headway applies |
+| `headway_secs` | `INTEGER` | Seconds between departures |
+| `exact_times` | `SMALLINT` | `0`=frequency-based/approximate, `1`=exact times generated at that headway |
+
+### `transfers` (from `transfers.txt`)
+Explicit transfer rules between stops (usually rare/special cases).
+
+| Column | Type | Meaning |
+|---|---|---|
+| `from_stop_id` / `to_stop_id` | `TEXT` | The two stops |
+| `transfer_type` | `SMALLINT` | `0`=recommended, `1`=timed transfer, `2`=minimum time required, `3`=not possible |
+| `min_transfer_time` | `INTEGER` | Seconds needed, if type `2` |
+
+### `stop_observations` (from `stop_observations.txt`)
+Not standard GTFS — 511's own record of what *actually* happened, matched to the schedule. One row per (trip, stop, service date) actually observed.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `trip_id` | `TEXT` | Which scheduled trip this observation is for |
+| `stop_sequence` | `INTEGER` | Which stop in that trip |
+| `service_date` | `DATE` | The actual calendar date this run happened |
+| `stop_id` | `TEXT` | The stop being arrived at (mapped from the file's `to_stop_id`) |
+| `from_stop_id` | `TEXT` | The previous stop, kept for context |
+| `schedule_relationship` | `TEXT` | `SCHEDULED`, `SKIPPED`, `CANCELED`, `UNSCHEDULED`, etc. — a skipped stop is a different reliability failure than a late one, worth splitting out |
+| `vehicle_id` | `TEXT` | Physical vehicle, if reported |
+| `scheduled_arrival_sec` / `observed_arrival_sec` | `INTEGER` | Seconds-since-midnight, same convention as `stop_times` |
+| `scheduled_departure_sec` / `observed_departure_sec` | `INTEGER` | Same, for departure |
+| `dwell_time_secs` / `scheduled_dwell_time_secs` | `INTEGER` | How long the vehicle actually sat at the stop vs. planned |
+| `uncertainty` | `INTEGER` | 511's own confidence measure on the observation |
+
+The two views (`v_stop_delays`, `v_route_otp_daily`) sit on top of this table
+and compute `observed - scheduled` for you — see `sql/schema/02_stop_observations.sql`.
 
 ## Roadmap / phases
 
